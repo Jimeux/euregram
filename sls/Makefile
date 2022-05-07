@@ -42,7 +42,7 @@ build-go:
 	@echo "Building all Go handlers:"
 	@for fn in authenticator authorizer lister persister presigner; do \
 		echo -n "	- building $${fn}..."; \
-		env GOARCH=amd64 GOOS=linux go1.18rc1 build -ldflags="-s -w" -o bin/$${fn}/$${fn} handlers/$${fn}/$${fn}.go || exit 1; \
+		env GOARCH=amd64 GOOS=linux go build -ldflags="-s -w" -o bin/$${fn}/$${fn} handlers/$${fn}/$${fn}.go || exit 1; \
 		echo "	done"; \
 	done
 
@@ -56,10 +56,10 @@ build-js:
 	@cp -r handlers/resizer/ bin/resizer/
 
 build-go-*:
-	env GOARCH=amd64 GOOS=linux go1.18rc1 build -ldflags="-s -w" -o bin/$*/$* handlers/$*/$*.go
+	env GOARCH=amd64 GOOS=linux go build -ldflags="-s -w" -o bin/$*/$* handlers/$*/$*.go
 
 deploy-go-*:
-	env GOARCH=amd64 GOOS=linux go1.18rc1 build -ldflags="-s -w" -o bin/$*/$* handlers/$*/$*.go
+	env GOARCH=amd64 GOOS=linux go build -ldflags="-s -w" -o bin/$*/$* handlers/$*/$*.go
 	sls deploy -f $*
 
 build-js-*:

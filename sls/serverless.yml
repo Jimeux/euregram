@@ -402,22 +402,10 @@ resources:
             Bucket: !GetAtt LogBucket.DomainName
             Prefix: logs
           CustomErrorResponses:
-            - ErrorCode: 403
-              ErrorCachingMinTTL: 0
-              ResponseCode: 403
             - ErrorCode: 404
               ErrorCachingMinTTL: 0
               ResponseCode: 200
               ResponsePagePath: /index.html
-            - ErrorCode: 401
-              ErrorCachingMinTTL: 0
-              ResponseCode: 401
-            - ErrorCode: 500
-              ErrorCachingMinTTL: 0
-              ResponseCode: 500
-            - ErrorCode: 503
-              ErrorCachingMinTTL: 0
-              ResponseCode: 503
 
   Outputs:
     Distribution:
