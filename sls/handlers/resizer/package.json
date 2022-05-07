@@ -1,0 +1,13 @@
+{
+  "name": "resizer",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "",
+  "main": "resizer.js",
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "aws-sdk": "^2.1087.0",
+    "sharp": "^0.30.2"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "name": "validator",
+  "version": "1.0.0",
+  "description": "",
+  "type": "module",
+  "main": "validator.js",
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "file-type": "^17.1.1"
+  }
+}

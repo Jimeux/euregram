@@ -1,0 +1,432 @@
+service: euregram
+
+frameworkVersion: '3'
+
+plugins:
+  - "@silvermine/serverless-plugin-cloudfront-lambda-edge"
+
+custom:
+  domain: ${ssm:euregram-${sls:stage}-domain}
+  hostedZone: ${ssm:euregram-${sls:stage}-hosted-zone}
+  jwtSecret: ${ssm:euregram-dev-jwt-secret}
+
+provider:
+  name: aws
+  runtime: go1.x
+  region: us-east-1
+  stage: dev
+  logs:
+    httpApi: true
+  httpApi:
+    # Note CORS policy not required when behind CF.
+    authorizers:
+      googleAuthorizer:
+        type: request
+        functionName: authorizer
+        identitySource: $request.header.authorization
+        enableSimpleResponses: true
+        resultTtlInSeconds: 300
+  iam:
+    # Zero-trust function roles not possible without a plugin, so defined castle-and-moat style here.
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - dynamodb:Query
+            - dynamodb:Scan
+            - dynamodb:GetItem
+            - dynamodb:PutItem
+          Resource:
+            - !GetAtt ImageTable.Arn
+            - !GetAtt StateTable.Arn
+            - !GetAtt UserTable.Arn
+            - !Sub ${UserTable.Arn}/index/*
+        - Effect: Allow
+          Action:
+            - s3:GetObject
+            - s3:PutObject
+          Resource: !Sub arn:aws:s3:::${UploadBucket}/*
+        - Effect: Allow
+          Action:
+            - s3:PutObject
+            - s3:GetObject
+          Resource: !Sub arn:aws:s3:::${ImageBucket}/*
+
+package:
+  individually: true
+  patterns:
+    - '!./**'
+
+functions:
+  authorizer:
+    package:
+      patterns:
+        - bin/authorizer/**
+    runtime: go1.x
+    handler: bin/authorizer/authorizer
+    environment:
+      JWT_SECRET: ${self:custom.jwtSecret}
+      USER_TABLE:
+        Ref: UserTable
+
+  authenticator:
+    package:
+      patterns:
+        - bin/authenticator/**
+    runtime: go1.x
+    handler: bin/authenticator/authenticator
+    environment:
+      GOOGLE_CLIENT_ID: ${ssm:euregram-${sls:stage}-google-client-id}
+      GOOGLE_CLIENT_SECRET: ${ssm:euregram-${sls:stage}-google-client-secret}
+      GOOGLE_REDIRECT_URL: ${ssm:euregram-dev-google-redirect-url}
+      JWT_SECRET: ${self:custom.jwtSecret}
+      STATE_TABLE:
+        Ref: StateTable
+      USER_TABLE:
+        Ref: UserTable
+    events:
+      - httpApi:
+          path: /api/auth/init
+          method: get
+      - httpApi:
+          path: /api/auth/confirm
+          method: post
+
+  presigner:
+    package:
+      patterns:
+        - bin/presigner/**
+    runtime: go1.x
+    handler: bin/presigner/presigner
+    environment:
+      IMAGE_DOMAIN: ${self:custom.domain}
+      UPLOAD_BUCKET:
+        Ref: UploadBucket
+    events:
+      - httpApi:
+          path: /api/presign
+          method: post
+          authorizer:
+            name: googleAuthorizer
+
+  persister:
+    package:
+      patterns:
+        - bin/persister/**
+    runtime: go1.x
+    handler: bin/persister/persister
+    environment:
+      IMAGE_DOMAIN: ${self:custom.domain}
+      IMAGE_BUCKET:
+        Ref: ImageBucket
+      UPLOAD_BUCKET:
+        Ref: UploadBucket
+      IMAGE_TABLE:
+        Ref: ImageTable
+    events:
+      - httpApi:
+          path: /api/persist
+          method: post
+          authorizer:
+            name: googleAuthorizer
+
+  lister:
+    package:
+      patterns:
+        - bin/lister/**
+    runtime: go1.x
+    handler: bin/lister/lister
+    environment:
+      IMAGE_DOMAIN: ${self:custom.domain}
+      IMAGE_TABLE:
+        Ref: ImageTable
+    events:
+      - httpApi:
+          path: /api/list
+          method: get
+          authorizer:
+            name: googleAuthorizer
+
+  validator:
+    name: euregram-image-validator
+    package:
+      patterns:
+        - bin/validator/**
+    runtime: nodejs14.x
+    handler: bin/validator/validator.handler
+    memorySize: 128
+    timeout: 30
+    lambdaAtEdge:
+      distribution: CloudFrontDistribution
+      eventType: origin-request
+      pathPattern: "/upload/*"
+      includeBody: true
+
+  resizer:
+    name: euregram-image-resizer
+    package:
+      patterns:
+        - bin/resizer/**
+    runtime: nodejs14.x
+    handler: bin/resizer/resizer.handler
+    memorySize: 512
+    timeout: 30
+    lambdaAtEdge:
+      distribution: CloudFrontDistribution
+      eventType: origin-request
+      pathPattern: "/images/*"
+      includeBody: true # FIXME want to set to false if possible
+
+resources:
+
+  Resources:
+
+    ImageTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: euregram-${sls:stage}-images
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: pk
+            AttributeType: S
+          - AttributeName: sk
+            AttributeType: S
+        KeySchema:
+          - AttributeName: pk
+            KeyType: HASH
+          - AttributeName: sk
+            KeyType: RANGE
+
+    StateTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: euregram-${sls:stage}-state
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: pk
+            AttributeType: S
+        KeySchema:
+          - AttributeName: pk
+            KeyType: HASH
+        TimeToLiveSpecification:
+          AttributeName: ttl
+          Enabled: true
+
+    UserTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: euregram-${sls:stage}-users
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: pk
+            AttributeType: S
+          - AttributeName: token
+            AttributeType: S
+        KeySchema:
+          - AttributeName: pk
+            KeyType: HASH
+        GlobalSecondaryIndexes:
+          - IndexName: token
+            KeySchema:
+              - AttributeName: token
+                KeyType: HASH
+            Projection:
+              ProjectionType: ALL
+
+    FrontendBucket:
+      Type: AWS::S3::Bucket
+      DeletionPolicy: Delete
+      Properties:
+        AccessControl: Private
+
+    FrontendBucketPolicy:
+      Type: AWS::S3::BucketPolicy
+      Properties:
+        Bucket: !Ref FrontendBucket
+        PolicyDocument:
+          Statement:
+            - Effect: Allow
+              Action:
+                - s3:getObject
+              Resource: !Sub arn:aws:s3:::${FrontendBucket}/*
+              Principal:
+                CanonicalUser: !GetAtt OriginAccessIdentity.S3CanonicalUserId
+
+    # Note: CORS policy not necessary behind CF
+    UploadBucket:
+      Type: AWS::S3::Bucket
+      DeletionPolicy: Delete
+      Properties:
+        AccessControl: Private
+        LifecycleConfiguration:
+          Rules:
+            - Id: ExpireRule
+              Prefix: ""
+              Status: Enabled
+              ExpirationInDays: 1
+
+    ImageBucket:
+       Type: AWS::S3::Bucket
+       DeletionPolicy: Delete
+       Properties:
+         AccessControl: Private
+
+    ImageBucketPolicy:
+      Type: AWS::S3::BucketPolicy
+      Properties:
+        Bucket: !Ref ImageBucket
+        PolicyDocument:
+          Statement:
+            - Effect: Allow
+              Action:
+                - s3:getObject
+              Resource: !Sub arn:aws:s3:::${ImageBucket}/*
+              Principal:
+                CanonicalUser: !GetAtt OriginAccessIdentity.S3CanonicalUserId
+
+    LogBucket:
+      Type: AWS::S3::Bucket
+      DeletionPolicy: Delete
+      Properties:
+        AccessControl: LogDeliveryWrite
+        LifecycleConfiguration:
+          Rules:
+            - Id: ExpireAthenaQueryResults
+              Status: Enabled
+              ExpirationInDays: 1
+
+    ACMCertificate:
+      Type: AWS::CertificateManager::Certificate
+      Properties:
+        DomainName: ${self:custom.domain}
+        ValidationMethod: DNS
+
+    Route53Record:
+      Type: AWS::Route53::RecordSet
+      Properties:
+        HostedZoneId: ${self:custom.hostedZone}
+        Name: ${self:custom.domain}
+        Type: A
+        AliasTarget:
+          HostedZoneId: Z2FDTNDATAQYW2 # This Zone ID is used for any CloudFront Distribution
+          DNSName: !GetAtt CloudFrontDistribution.DomainName
+
+    OriginAccessIdentity:
+      Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+      Properties:
+        CloudFrontOriginAccessIdentityConfig:
+          Comment: Provides access to FrontendBucket and ImageBucket
+
+    CloudFrontDistribution:
+      Type: AWS::CloudFront::Distribution
+      Properties:
+        DistributionConfig:
+          Aliases:
+            - ${self:custom.domain}
+          CacheBehaviors:
+            - TargetOriginId: Api
+              AllowedMethods: [HEAD, DELETE, POST, GET, OPTIONS, PUT, PATCH]
+              Compress: false
+              PathPattern: "/api/*"
+              ViewerProtocolPolicy: "https-only"
+              DefaultTTL: 0
+              MinTTL: 0
+              MaxTTL: 0
+              ForwardedValues:
+                Headers: ["Authorization", "Content-Type"]
+                QueryString: true
+                Cookies:
+                  Forward: "none"
+              # FIXME Ideally the below policy params could be used instead of legacy cache settings.
+              # ResponseHeadersPolicyId: 5cc3b908-e619-4b99-88e5-2cf7f45965bd # Managed-CORS-with-preflight
+              # CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad # Managed-CachingDisabled
+              # OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3 # Managed-AllViewer
+            - TargetOriginId: UploadOrigin
+              PathPattern: "/upload/*"
+              Compress: false
+              AllowedMethods: [HEAD, DELETE, POST, GET, OPTIONS, PUT, PATCH]
+              MinTTL: 0
+              ViewerProtocolPolicy: "redirect-to-https"
+              ForwardedValues:
+                Headers: ["Content-Length", "Content-Type"]
+                QueryString: "true"
+                Cookies:
+                  Forward: "none"
+            - TargetOriginId: ImageOrigin
+              PathPattern: "/images/*"
+              AllowedMethods: [GET, HEAD, OPTIONS]
+              Compress: true
+              MinTTL: 0
+              ViewerProtocolPolicy: "redirect-to-https"
+              ForwardedValues:
+                QueryString: "true"
+                Cookies:
+                  Forward: "none"
+          DefaultCacheBehavior:
+            AllowedMethods: [GET, HEAD, OPTIONS]
+            Compress: true
+            DefaultTTL: 86400 # 24h
+            ForwardedValues:
+              QueryString: "true"
+              Cookies:
+                Forward: "none"
+            TargetOriginId: FrontendOrigin
+            ViewerProtocolPolicy: "redirect-to-https"
+          DefaultRootObject: "index.html"
+          Enabled: "true"
+          PriceClass: PriceClass_200
+          HttpVersion: http2
+          Origins:
+            - Id: Api
+              DomainName: !Sub ${HttpApi}.execute-api.${AWS::Region}.amazonaws.com
+              CustomOriginConfig:
+                OriginProtocolPolicy: 'https-only'
+                OriginSSLProtocols:
+                  - "TLSv1.2"
+            - Id: ImageOrigin
+              DomainName: !GetAtt ImageBucket.RegionalDomainName
+              S3OriginConfig:
+                OriginAccessIdentity: !Sub origin-access-identity/cloudfront/${OriginAccessIdentity}
+            - Id: UploadOrigin
+              DomainName: !GetAtt UploadBucket.RegionalDomainName
+              S3OriginConfig: { }
+            - Id: FrontendOrigin
+              DomainName: !GetAtt FrontendBucket.RegionalDomainName
+              S3OriginConfig:
+                OriginAccessIdentity: !Sub origin-access-identity/cloudfront/${OriginAccessIdentity}
+          ViewerCertificate:
+            AcmCertificateArn: !Ref ACMCertificate
+            MinimumProtocolVersion: "TLSv1.2_2021"
+            SslSupportMethod: "sni-only"
+          Logging:
+            Bucket: !GetAtt LogBucket.DomainName
+            Prefix: logs
+          CustomErrorResponses:
+            - ErrorCode: 403
+              ErrorCachingMinTTL: 0
+              ResponseCode: 403
+            - ErrorCode: 404
+              ErrorCachingMinTTL: 0
+              ResponseCode: 200
+              ResponsePagePath: /index.html
+            - ErrorCode: 401
+              ErrorCachingMinTTL: 0
+              ResponseCode: 401
+            - ErrorCode: 500
+              ErrorCachingMinTTL: 0
+              ResponseCode: 500
+            - ErrorCode: 503
+              ErrorCachingMinTTL: 0
+              ResponseCode: 503
+
+  Outputs:
+    Distribution:
+      Value: !Ref CloudFrontDistribution
+    ImageBucket:
+      Value: !Ref ImageBucket
+    LogBucket:
+      Value: !Ref LogBucket
+    UploadBucket:
+      Value: !Ref UploadBucket
+    FrontendBucket:
+      Value: !Ref FrontendBucket

@@ -1,0 +1,5 @@
+{
+  "devDependencies": {
+    "@silvermine/serverless-plugin-cloudfront-lambda-edge": "^2.2.3"
+  }
+}
